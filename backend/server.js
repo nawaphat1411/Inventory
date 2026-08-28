@@ -196,19 +196,32 @@ app.put('/api/products/:id', authenticateToken, requireAdmin, async (req, res) =
   }
 });
 
+// 🛠️ DELETE Route ปรับแก้ลบข้อมูลใน order_items ก่อนเพื่อไม่ให้ติด Foreign Key Constraint
 app.delete('/api/products/:id', authenticateToken, requireAdmin, async (req, res) => {
+  const connection = await db.getConnection();
   try {
     const { id } = req.params;
-    const [result] = await db.query('DELETE FROM inventory WHERE id = ?', [id]);
+    await connection.beginTransaction();
+
+    // 1. ลบรายการสินค้าที่ถูกอ้างอิงใน order_items ก่อน
+    await connection.query('DELETE FROM order_items WHERE product_id = ?', [id]);
+
+    // 2. ลบตัวสินค้าในตาราง inventory
+    const [result] = await connection.query('DELETE FROM inventory WHERE id = ?', [id]);
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Product not found' });
+      await connection.rollback();
+      return res.status(404).json({ success: false, error: 'ไม่พบสินค้าที่ต้องการลบ' });
     }
 
-    res.json({ success: true, message: 'Product deleted successfully' });
+    await connection.commit();
+    res.json({ success: true, message: 'ลบสินค้าสำเร็จ' });
   } catch (error) {
+    await connection.rollback();
     console.error('Delete Product Error:', error);
-    res.status(500).json({ error: 'Failed to delete product' });
+    res.status(500).json({ success: false, error: 'เกิดข้อผิดพลาดในการลบสินค้า: ' + error.message });
+  } finally {
+    connection.release();
   }
 });
 
@@ -302,7 +315,6 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
     `;
     let params = [];
 
-    // ✏️ เช็ก role และกรองเฉพาะ user_id ของผู้ใช้ที่ล็อกอินอยู่
     if (req.user.role !== 'admin') {
       const currentUserId = req.user.user_id || req.user.id;
       ordersSql += ` WHERE o.user_id = ?`;

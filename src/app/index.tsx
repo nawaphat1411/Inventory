@@ -14,8 +14,7 @@ import {
   View,
 } from 'react-native';
 
-// แก้ไข Path ให้ตรงกับโครงสร้าง Expo Router (src/app/)
-import AdminOrdersModal from '../constants//AdminOrdersModal'; // 👑 Import AdminOrdersModal
+import AdminOrdersModal from '../constants/AdminOrdersModal';
 import CheckoutModal from '../constants/CheckoutModal';
 import HomeScreen from './HomeScreen';
 import LoginScreen from './LoginScreen';
@@ -250,31 +249,53 @@ export default function App() {
       });
   };
 
-  // Admin Actions: ลบสินค้า
+  // 🛠️ Admin Actions: ลบสินค้า (รองรับทั้ง Web และ Mobile)
+  const executeDelete = (id: number) => {
+    fetch(`${API_BASE_URL}/products/${id}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const errorData = await res.json().catch(() => ({}));
+          throw new Error(errorData.message || 'ไม่สามารถลบข้อมูลได้ สินค้าอาจผูกอยู่กับออเดอร์');
+        }
+        return res.status !== 204 ? res.json().catch(() => ({})) : {};
+      })
+      .then(() => {
+        if (Platform.OS === 'web') {
+          window.alert('ลบสินค้าเรียบร้อยแล้ว');
+        } else {
+          Alert.alert('สำเร็จ', 'ลบสินค้าเรียบร้อยแล้ว');
+        }
+        setModalVisible(false);
+        fetchProducts(searchQuery);
+      })
+      .catch((err) => {
+        if (Platform.OS === 'web') {
+          window.alert(err.message);
+        } else {
+          Alert.alert('ข้อผิดพลาด', err.message);
+        }
+      });
+  };
+
   const handleDeleteProduct = (id: number) => {
-    Alert.alert('ยืนยันการลบ', 'คุณแน่ใจหรือไม่ว่าต้องการลบสินค้านี้?', [
-      { text: 'ยกเลิก', style: 'cancel' },
-      {
-        text: 'ลบข้อมูล',
-        style: 'destructive',
-        onPress: () => {
-          fetch(`${API_BASE_URL}/products/${id}`, {
-            method: 'DELETE',
-            headers: { Authorization: `Bearer ${token}` },
-          })
-            .then((res) => {
-              if (!res.ok) throw new Error('ไม่สามารถลบข้อมูลได้');
-              return res.json();
-            })
-            .then(() => {
-              Alert.alert('สำเร็จ', 'ลบสินค้าเรียบร้อยแล้ว');
-              setModalVisible(false);
-              fetchProducts(searchQuery);
-            })
-            .catch((err) => Alert.alert('ข้อผิดพลาด', err.message));
+    if (Platform.OS === 'web') {
+      const confirmed = window.confirm('คุณแน่ใจหรือไม่ว่าต้องการลบสินค้านี้?');
+      if (confirmed) {
+        executeDelete(id);
+      }
+    } else {
+      Alert.alert('ยืนยันการลบ', 'คุณแน่ใจหรือไม่ว่าต้องการลบสินค้านี้?', [
+        { text: 'ยกเลิก', style: 'cancel' },
+        {
+          text: 'ลบข้อมูล',
+          style: 'destructive',
+          onPress: () => executeDelete(id),
         },
-      },
-    ]);
+      ]);
+    }
   };
 
   // Modals Controller
@@ -285,6 +306,7 @@ export default function App() {
 
   const openAddModal = () => {
     setIsEditMode(false);
+    setEditingId(null);
     setName('');
     setStock('');
     setPrice('');
@@ -306,6 +328,29 @@ export default function App() {
     setStatus(product.status || 'Active');
     setImage(product.image || '');
     setModalVisible(true);
+  };
+  // 📁 ฟังก์ชันเลือกรูปจากเครื่อง (สำหรับ Web Browser)
+  const handlePickLocalImage = () => {
+    if (Platform.OS === 'web') {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = (e: any) => {
+        const file = e.target.files?.[0];
+        if (file) {
+          const reader = new FileReader();
+          reader.onload = () => {
+            if (reader.result) {
+              setImage(reader.result.toString());
+            }
+          };
+          reader.readAsDataURL(file);
+        }
+      };
+      input.click();
+    } else {
+      Alert.alert('แจ้งเตือน', 'กรุณาเปิดผ่าน Web Browser เพื่อเลือกรูปภาพจากเครื่อง');
+    }
   };
 
   if (!token) {
@@ -555,15 +600,45 @@ export default function App() {
 
             <Text style={styles.inputLabel}>รายละเอียด/คำอธิบายสินค้า</Text>
             <TextInput style={[styles.input, { height: 60 }]} value={location} onChangeText={setLocation} multiline placeholder="ระบุฟังก์ชันหรือสเปคเบื้องต้น" />
+{/* 🖼️ แสดงตัวอย่างรูปภาพเมื่อเลือกแล้ว */}
+            {image ? (
+              <View style={{ alignItems: 'center', marginBottom: 10 }}>
+                <Image source={{ uri: image }} style={{ width: 100, height: 100, borderRadius: 8, marginBottom: 6 }} />
+                <TouchableOpacity 
+                  style={{ backgroundColor: '#fee2e2', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 4 }} 
+                  onPress={() => setImage('')}
+                >
+                  <Text style={{ color: '#ef4444', fontSize: 12, fontWeight: 'bold' }}>✕ ลบรูปภาพ</Text>
+                </TouchableOpacity>
+              </View>
+            ) : null}
 
-            <Text style={styles.inputLabel}>URL รูปภาพ</Text>
+            {/* 📁 ปุ่มเลือกไฟล์จากเครื่อง */}
+            <TouchableOpacity 
+              style={{
+                backgroundColor: '#e0f2fe',
+                borderColor: '#38bdf8',
+                borderWidth: 1,
+                padding: 10,
+                borderRadius: 8,
+                alignItems: 'center',
+                marginBottom: 12
+              }} 
+              onPress={handlePickLocalImage}
+            >
+              <Text style={{ color: '#0284c7', fontWeight: 'bold', fontSize: 13 }}>📁 เลือกไฟล์รูปภาพจากเครื่อง</Text>
+            </TouchableOpacity>
+
+            <Text style={styles.inputLabel}>หรือใส่ URL รูปภาพ</Text>
             <TextInput style={styles.input} value={image} onChangeText={setImage} placeholder="https://example.com/image.jpg" />
+            
 
             <TouchableOpacity style={styles.saveButton} onPress={handleSaveProduct}>
               <Text style={styles.saveButtonText}>{isEditMode ? 'อัปเดตข้อมูล' : 'บันทึกสินค้าใหม่'}</Text>
             </TouchableOpacity>
 
-            {isEditMode && editingId && (
+            {/* 🗑️ ปุ่มลบสินค้า (แก้ไขให้กดแล้วลบแน่นอน) */}
+            {isEditMode && editingId !== null && (
               <TouchableOpacity style={styles.deleteButton} onPress={() => handleDeleteProduct(editingId)}>
                 <Text style={styles.deleteButtonText}>🗑️ ลบสินค้านี้</Text>
               </TouchableOpacity>
@@ -674,7 +749,7 @@ export default function App() {
         visible={adminOrdersVisible}
         onClose={() => {
           setAdminOrdersVisible(false);
-          fetchOrders(); // รีเฟรชรายการออเดอร์เมื่อปิด modal
+          fetchOrders();
         }}
         userToken={token || ''}
       />
@@ -774,58 +849,56 @@ const styles = StyleSheet.create({
   editBtnText: { color: '#0369a1', fontWeight: 'bold', fontSize: 13 },
   detailBtn: { backgroundColor: '#f1f5f9', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, marginRight: 8, flex: 1, alignItems: 'center' },
   detailBtnText: { color: '#475569', fontWeight: 'bold', fontSize: 13 },
-  buyBtn: { backgroundColor: '#16a34a', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 6, flex: 1.5, alignItems: 'center' },
-  disabledBtn: { backgroundColor: '#cbd5e1' },
+  buyBtn: { backgroundColor: '#2563eb', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 6, flex: 1, alignItems: 'center' },
   buyBtnText: { color: '#ffffff', fontWeight: 'bold', fontSize: 13 },
+  disabledBtn: { backgroundColor: '#cbd5e1' },
 
-  orderCard: { backgroundColor: '#ffffff', borderRadius: 12, padding: 14, marginBottom: 12, elevation: 2 },
-  orderHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  orderId: { fontWeight: 'bold', color: '#0f172a', fontSize: 15 },
-  orderStatus: { color: '#d97706', fontWeight: 'bold', fontSize: 12, backgroundColor: '#fef3c7', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 8 },
-  orderDetailText: { fontSize: 13, color: '#475569', marginBottom: 2 },
-  orderItemsList: { backgroundColor: '#f8fafc', padding: 8, borderRadius: 6, marginVertical: 8 },
+  adminOrdersBtn: { backgroundColor: '#f59e0b', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
+  adminOrdersBtnText: { color: '#ffffff', fontWeight: 'bold', fontSize: 12 },
+
+  orderCard: { backgroundColor: '#ffffff', borderRadius: 12, padding: 12, marginBottom: 10, borderWidth: 1, borderColor: '#e2e8f0' },
+  orderHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  orderId: { fontWeight: 'bold', fontSize: 14, color: '#0f172a' },
+  orderStatus: { color: '#16a34a', fontWeight: 'bold', fontSize: 13 },
+  orderDetailText: { fontSize: 12, color: '#64748b', marginBottom: 2 },
+  orderItemsList: { backgroundColor: '#f8fafc', padding: 8, borderRadius: 6, marginVertical: 6 },
   orderFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 },
-  orderTotal: { fontWeight: 'bold', fontSize: 15, color: '#16a34a' },
+  orderTotal: { fontWeight: 'bold', color: '#0f172a', fontSize: 14 },
 
-  adminOrdersBtn: { backgroundColor: '#334155', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
-  adminOrdersBtnText: { color: '#ffffff', fontSize: 12, fontWeight: 'bold' },
-
-  fullScreenOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', justifyContent: 'center', alignItems: 'center' },
-  fullScreenImage: { width: '92%', height: '80%' },
-  closeZoomBtn: { position: 'absolute', top: 40, right: 20, backgroundColor: 'rgba(255,255,255,0.2)', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
-  closeZoomBtnText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
-
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.6)', justifyContent: 'center', padding: 20 },
-  modalContainer: { backgroundColor: '#ffffff', borderRadius: 16, padding: 20, maxHeight: '85%' },
-  modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#0f172a', marginBottom: 14, textAlign: 'center' },
-  inputLabel: { fontSize: 13, fontWeight: 'bold', color: '#334155', marginTop: 8, marginBottom: 4 },
-  input: { backgroundColor: '#f8fafc', borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, padding: 10, fontSize: 14, color: '#0f172a' },
-
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', padding: 16 },
+  modalContainer: { backgroundColor: '#ffffff', borderRadius: 16, padding: 20, maxHeight: '90%' },
+  modalTitle: { fontSize: 18, fontWeight: 'bold', color: '#0f172a', marginBottom: 12, textAlign: 'center' },
+  inputLabel: { fontSize: 12, fontWeight: 'bold', color: '#475569', marginTop: 8, marginBottom: 4 },
+  input: { borderWidth: 1, borderColor: '#cbd5e1', borderRadius: 8, padding: 8, fontSize: 14, backgroundColor: '#f8fafc' },
   categorySelectRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginVertical: 4 },
-  miniChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 16, backgroundColor: '#f1f5f9' },
+  miniChip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, backgroundColor: '#f1f5f9' },
   miniChipActive: { backgroundColor: '#2563eb' },
   miniChipText: { fontSize: 12, color: '#475569' },
-  miniChipTextActive: { color: '#ffffff', fontWeight: 'bold' },
-
-  detailImage: { width: '100%', height: 180, borderRadius: 12, marginBottom: 12 },
-  detailPrice: { fontSize: 22, fontWeight: 'bold', color: '#2563eb', textAlign: 'center', marginBottom: 12 },
-  detailInfoBox: { backgroundColor: '#f8fafc', padding: 12, borderRadius: 8, marginBottom: 16 },
-  detailInfoText: { fontSize: 13, color: '#334155', marginBottom: 6 },
-
-  saveButton: { backgroundColor: '#2563eb', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 12 },
-  saveButtonText: { color: '#ffffff', fontWeight: 'bold', fontSize: 15 },
+  miniChipTextActive: { color: '#ffffff' },
+  saveButton: { backgroundColor: '#2563eb', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 16 },
+  saveButtonText: { color: '#ffffff', fontWeight: 'bold', fontSize: 14 },
   deleteButton: { backgroundColor: '#fee2e2', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 8 },
   deleteButtonText: { color: '#ef4444', fontWeight: 'bold', fontSize: 14 },
-  cancelButton: { padding: 10, alignItems: 'center', marginTop: 6 },
-  cancelText: { color: '#64748b' },
+  cancelButton: { padding: 12, alignItems: 'center', marginTop: 4 },
+  cancelText: { color: '#64748b', fontWeight: 'bold' },
+
+  detailImage: { width: '100%', height: 180, borderRadius: 8, marginBottom: 12, resizeMode: 'cover' },
+  detailPrice: { fontSize: 22, fontWeight: 'bold', color: '#2563eb', textAlign: 'center', marginBottom: 12 },
+  detailInfoBox: { backgroundColor: '#f8fafc', padding: 10, borderRadius: 8, marginBottom: 8 },
+  detailInfoText: { fontSize: 13, color: '#334155', marginBottom: 4 },
 
   cartRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: '#f1f5f9' },
-  totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#cbd5e1' },
+  totalRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginVertical: 12, paddingTop: 8, borderTopWidth: 1, borderTopColor: '#e2e8f0' },
 
-  bottomNav: { flexDirection: 'row', backgroundColor: '#ffffff', borderTopWidth: 1, borderTopColor: '#e2e8f0', paddingVertical: 8, paddingBottom: Platform.OS === 'ios' ? 20 : 8 },
-  navItem: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  fullScreenOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.9)', justifyContent: 'center', alignItems: 'center' },
+  fullScreenImage: { width: '90%', height: '70%' },
+  closeZoomBtn: { position: 'absolute', top: 40, right: 20, backgroundColor: '#ffffff', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, zIndex: 10 },
+  closeZoomBtnText: { color: '#0f172a', fontWeight: 'bold', fontSize: 12 },
+
+  bottomNav: { flexDirection: 'row', backgroundColor: '#ffffff', borderTopWidth: 1, borderTopColor: '#e2e8f0', paddingVertical: 8 },
+  navItem: { flex: 1, alignItems: 'center' },
   navIcon: { fontSize: 18, opacity: 0.5 },
   navIconActive: { opacity: 1 },
-  navLabel: { fontSize: 10, color: '#64748b', marginTop: 2 },
+  navLabel: { fontSize: 11, color: '#64748b', marginTop: 2 },
   navLabelActive: { color: '#2563eb', fontWeight: 'bold' },
 });
