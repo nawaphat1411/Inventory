@@ -1,397 +1,231 @@
 const express = require('express');
 const cors = require('cors');
-const db = require('./db');
-const jwt = require('jsonwebtoken');
+const mysql = require('mysql2/promise');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3025;
-const JWT_SECRET = process.env.JWT_SECRET || 'my_super_secret_key_1234';
 
-// ⚙️ ตั้งค่า CORS และรองรับไฟล์ขนาดใหญ่ (รูปสลิป Base64)
+// Middleware
 app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json({ limit: '10mb' }));
 
-// ==========================================
-// 🛡️ MIDDLEWARES
-// ==========================================
-
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({ success: false, error: 'Access token required' });
-  }
-
-  jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) {
-      return res.status(403).json({ success: false, error: 'Invalid or expired token' });
-    }
-    req.user = user;
-    next();
-  });
-};
-
-const requireAdmin = (req, res, next) => {
-  if (req.user && req.user.role === 'admin') {
-    next();
-  } else {
-    return res.status(403).json({ success: false, error: 'Permission denied: Admins only' });
-  }
-};
-
-// ==========================================
-// 🔐 AUTH ROUTES
-// ==========================================
-
-app.post('/api/register', async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'กรุณากรอก Username และ Password ให้ครบถ้วน' });
-    }
-
-    const [existingUser] = await db.query('SELECT * FROM users WHERE username = ?', [username.trim()]);
-    if (existingUser.length > 0) {
-      return res.status(400).json({ success: false, error: 'ชื่อผู้ใช้นี้ถูกใช้งานแล้ว' });
-    }
-
-    const sql = 'INSERT INTO users (username, password, role) VALUES (?, ?, ?)';
-    await db.query(sql, [username.trim(), password.trim(), 'user']);
-
-    res.status(201).json({ success: true, message: 'สมัครสมาชิกสำเร็จ' });
-  } catch (error) {
-    console.error('Register Error:', error);
-    res.status(500).json({ success: false, error: 'Internal Server Error' });
-  }
+// 🛢️ Connection Pool เชื่อมต่อ DB ip_std6730202254 ตาม phpMyAdmin มหาวิทยาลัย
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'std6730202254',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'ip_std6730202254',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0,
 });
 
-app.post('/api/login', async (req, res) => {
+// ==========================================
+// 🔐 1. AUTHENTICATION SYSTEM (ตาราง Nawaphat_Niemsri_users)
+// ==========================================
+const handleLogin = async (req, res) => {
   try {
-    const { username, password } = req.body;
+    const { username, password } = req.body || {};
+    console.log('🔑 Login Attempt:', { username, password });
 
     if (!username || !password) {
-      return res.status(400).json({ success: false, error: 'กรุณากรอก Username และ Password' });
+      return res.status(400).json({ success: false, message: 'กรุณากรอก Username และ Password' });
     }
 
-    const [rows] = await db.query('SELECT * FROM users WHERE username = ? AND password = ?', [
-      username.trim(),
-      password.trim(),
-    ]);
+    // Query ตรวจสอบกับตาราง Nawaphat_Niemsri_users ใน phpMyAdmin
+    const sql = 'SELECT * FROM Nawaphat_Niemsri_users WHERE username = ? AND password = ?';
+    const [rows] = await pool.query(sql, [username.trim(), password.trim()]);
 
-    if (rows.length === 0) {
-      return res.status(401).json({ success: false, error: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง' });
+    if (rows.length > 0) {
+      const user = rows[0];
+      return res.status(200).json({
+        success: true,
+        message: 'เข้าสู่ระบบสำเร็จ',
+        user: {
+          id: user.user_id,
+          username: user.username,
+          role: user.role,
+        },
+        token: 'mock-jwt-token',
+      });
     }
 
-    const user = rows[0];
-    const userId = user.user_id || user.id;
-
-    const token = jwt.sign(
-      { user_id: userId, id: userId, username: user.username, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        user_id: userId,
-        id: userId,
-        username: user.username,
-        role: user.role,
-      },
+    return res.status(401).json({
+      success: false,
+      message: 'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง',
     });
   } catch (error) {
     console.error('Login Error:', error);
-    res.status(500).json({ success: false, error: 'Internal Server Error' });
+    return res.status(500).json({ success: false, message: error.message });
   }
-});
+};
 
 // ==========================================
-// 📦 PRODUCT ROUTES
+// 👥 2. HR SYSTEM / EMPLOYEES (ตาราง Nawaphat_Niemsri_employees)
 // ==========================================
 
-app.get('/api/products', async (req, res) => {
+// ดึงพนักงานทั้งหมด
+const getEmployees = async (req, res) => {
   try {
-    const { q } = req.query;
-    let sql = 'SELECT * FROM inventory';
-    let params = [];
+    const [rows] = await pool.query('SELECT * FROM Nawaphat_Niemsri_employees ORDER BY id DESC');
+    res.status(200).json(rows);
+  } catch (error) {
+    console.error('Fetch Employees Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
 
-    if (q && q.trim() !== '') {
-      sql += ' WHERE name LIKE ? OR category LIKE ? OR location LIKE ?';
-      const searchTerm = `%${q.trim()}%`;
-      params = [searchTerm, searchTerm, searchTerm];
+// เพิ่มพนักงานใหม่
+const addEmployee = async (req, res) => {
+  try {
+    const { name, position, salary } = req.body;
+    if (!name || !position || salary === undefined || salary === null || salary === '') {
+      return res.status(400).json({ success: false, message: 'กรุณากรอกข้อมูลให้ครบถ้วน' });
     }
 
-    sql += ' ORDER BY id ASC';
-
-    const [rows] = await db.query(sql, params);
-    res.json(rows);
-  } catch (error) {
-    console.error('Error fetching products:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-app.get('/api/products/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const [rows] = await db.query('SELECT * FROM inventory WHERE id = ?', [id]);
-    if (rows.length === 0) return res.status(404).json({ error: 'Product not found' });
-    res.json(rows[0]);
-  } catch (error) {
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-});
-
-app.post('/api/products', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { name, stock, price, category, location, status, image } = req.body;
-    if (!name) return res.status(400).json({ error: 'Name is required' });
-
-    const sql = `INSERT INTO inventory (name, stock, price, category, location, status, image) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-    const [result] = await db.query(sql, [
-      name,
-      Number(stock) || 0,
-      Number(price) || 0,
-      category || null,
-      location || null,
-      status || 'Active',
-      image || null,
-    ]);
-
-    res.status(201).json({ success: true, productId: result.insertId });
-  } catch (error) {
-    console.error('Create Product Error:', error);
-    res.status(500).json({ error: 'Failed to create product' });
-  }
-});
-
-app.put('/api/products/:id', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { name, stock, price, category, location, status, image } = req.body;
-    if (!name) return res.status(400).json({ error: 'Missing name' });
-
-    const sql = `UPDATE inventory SET name = ?, stock = ?, price = ?, category = ?, location = ?, status = ?, image = ? WHERE id = ?`;
-    const [result] = await db.query(sql, [
-      name,
-      Number(stock) || 0,
-      Number(price) || 0,
-      category || null,
-      location || null,
-      status || 'Active',
-      image || null,
-      id,
-    ]);
-
-    if (result.affectedRows === 0) return res.status(404).json({ error: 'Product not found' });
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Update Product Error:', error);
-    res.status(500).json({ error: 'Failed to update product' });
-  }
-});
-
-// 🛠️ DELETE Route ปรับแก้ลบข้อมูลใน order_items ก่อนเพื่อไม่ให้ติด Foreign Key Constraint
-app.delete('/api/products/:id', authenticateToken, requireAdmin, async (req, res) => {
-  const connection = await db.getConnection();
-  try {
-    const { id } = req.params;
-    await connection.beginTransaction();
-
-    // 1. ลบรายการสินค้าที่ถูกอ้างอิงใน order_items ก่อน
-    await connection.query('DELETE FROM order_items WHERE product_id = ?', [id]);
-
-    // 2. ลบตัวสินค้าในตาราง inventory
-    const [result] = await connection.query('DELETE FROM inventory WHERE id = ?', [id]);
-
-    if (result.affectedRows === 0) {
-      await connection.rollback();
-      return res.status(404).json({ success: false, error: 'ไม่พบสินค้าที่ต้องการลบ' });
-    }
-
-    await connection.commit();
-    res.json({ success: true, message: 'ลบสินค้าสำเร็จ' });
-  } catch (error) {
-    await connection.rollback();
-    console.error('Delete Product Error:', error);
-    res.status(500).json({ success: false, error: 'เกิดข้อผิดพลาดในการลบสินค้า: ' + error.message });
-  } finally {
-    connection.release();
-  }
-});
-
-// ==========================================
-// 🛒 ORDER ROUTES (สั่งซื้อ & ตัดสต๊อกจริง)
-// ==========================================
-
-app.post('/api/orders', authenticateToken, async (req, res) => {
-  const connection = await db.getConnection();
-  try {
-    const { customerName, phone, address, slipImage, items, totalAmount } = req.body;
-    const userId = req.user.user_id || req.user.id;
-
-    if (!items || items.length === 0) {
-      return res.status(400).json({ success: false, error: 'ไม่มีสินค้าในตะกร้า' });
-    }
-
-    await connection.beginTransaction();
-
-    for (const item of items) {
-      const [rows] = await connection.query('SELECT stock, name FROM inventory WHERE id = ?', [item.id]);
-      if (rows.length === 0) {
-        await connection.rollback();
-        return res.status(404).json({ success: false, error: `ไม่พบสินค้า ID: ${item.id}` });
-      }
-
-      const currentStock = rows[0].stock;
-      if (currentStock < item.cartQuantity) {
-        await connection.rollback();
-        return res.status(400).json({
-          success: false,
-          error: `สินค้า "${rows[0].name}" มีสต๊อกไม่พอ (เหลือ ${currentStock} ชิ้น)`,
-        });
-      }
-    }
-
-    const orderSql = `
-      INSERT INTO orders (user_id, customer_name, phone, address, slip_image, total_amount, status)
-      VALUES (?, ?, ?, ?, ?, ?, 'รอการตรวจสอบ')
-    `;
-    const [orderResult] = await connection.query(orderSql, [
-      userId,
-      customerName.trim(),
-      phone.trim(),
-      address.trim(),
-      slipImage || null,
-      Number(totalAmount) || 0,
-    ]);
-
-    const orderId = orderResult.insertId;
-
-    for (const item of items) {
-      const itemSql = `
-        INSERT INTO order_items (order_id, product_id, product_name, price, quantity)
-        VALUES (?, ?, ?, ?, ?)
-      `;
-      await connection.query(itemSql, [
-        orderId,
-        item.id,
-        item.name,
-        Number(item.price) || 0,
-        item.cartQuantity,
-      ]);
-
-      const updateStockSql = `UPDATE inventory SET stock = stock - ? WHERE id = ?`;
-      await connection.query(updateStockSql, [item.cartQuantity, item.id]);
-    }
-
-    await connection.commit();
+    const sql = 'INSERT INTO Nawaphat_Niemsri_employees (name, position, status, salary) VALUES (?, ?, ?, ?)';
+    const [result] = await pool.query(sql, [name.trim(), position.trim(), 'Active', Number(salary)]);
 
     res.status(201).json({
       success: true,
-      message: 'สั่งซื้อสำเร็จและตัดสต๊อกเรียบร้อยแล้ว',
-      orderId,
+      employee: { id: result.insertId, name, position, status: 'Active', salary: Number(salary) },
     });
   } catch (error) {
-    await connection.rollback();
-    console.error('Create Order Error:', error);
-    res.status(500).json({ success: false, error: 'เกิดข้อผิดพลาดในการสร้างคำสั่งซื้อ' });
-  } finally {
-    connection.release();
+    console.error('Add Employee Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-});
+};
 
-app.get('/api/orders', authenticateToken, async (req, res) => {
-  try {
-    let ordersSql = `
-      SELECT o.id, o.user_id, o.customer_name AS customerName, o.phone, o.address, 
-             o.slip_image AS slipImage, o.total_amount AS totalAmount, o.status, o.created_at AS createdAt
-      FROM orders o
-    `;
-    let params = [];
-
-    if (req.user.role !== 'admin') {
-      const currentUserId = req.user.user_id || req.user.id;
-      ordersSql += ` WHERE o.user_id = ?`;
-      params.push(currentUserId);
-    }
-
-    ordersSql += ` ORDER BY o.id DESC`;
-
-    const [orders] = await db.query(ordersSql, params);
-
-    for (let order of orders) {
-      const [items] = await db.query(
-        `SELECT product_id AS id, product_name AS name, price, quantity AS cartQuantity FROM order_items WHERE order_id = ?`,
-        [order.id]
-      );
-      order.items = items;
-    }
-
-    res.json(orders);
-  } catch (error) {
-    console.error('Fetch Orders Error:', error);
-    res.status(500).json({ success: false, error: 'Internal Server Error' });
-  }
-});
-
-// ==========================================
-// 🛠️ ADMIN ORDER STATUS UPDATE
-// ==========================================
-
-app.put('/api/orders/:id', authenticateToken, requireAdmin, async (req, res) => {
+// สลับสถานะพนักงาน (Active / On Leave)
+const toggleStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const [rows] = await pool.query('SELECT status FROM Nawaphat_Niemsri_employees WHERE id = ?', [id]);
 
-    if (!status) {
-      return res.status(400).json({ success: false, error: 'กรุณาระบุสถานะ' });
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'ไม่พบพนักงาน' });
     }
 
-    const [result] = await db.query('UPDATE orders SET status = ? WHERE id = ?', [status, id]);
+    const newStatus = rows[0].status === 'Active' ? 'On Leave' : 'Active';
+    await pool.query('UPDATE Nawaphat_Niemsri_employees SET status = ? WHERE id = ?', [newStatus, id]);
 
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, error: 'ไม่พบคำสั่งซื้อนี้' });
-    }
-
-    res.json({ success: true, message: 'อัปเดตสถานะคำสั่งซื้อสำเร็จ', orderId: Number(id), status });
+    res.status(200).json({ success: true, newStatus });
   } catch (error) {
-    console.error('Update Order Status Error:', error);
-    res.status(500).json({ success: false, error: 'เกิดข้อผิดพลาดในการอัปเดตสถานะ' });
+    console.error('Update Status Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-});
+};
 
-app.patch('/api/orders/:id', authenticateToken, requireAdmin, async (req, res) => {
+// ลบพนักงานออกจาก MySQL จริง
+const deleteEmployee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
-
-    if (!status) {
-      return res.status(400).json({ success: false, error: 'กรุณาระบุสถานะ' });
-    }
-
-    const [result] = await db.query('UPDATE orders SET status = ? WHERE id = ?', [status, id]);
+    const [result] = await pool.query('DELETE FROM Nawaphat_Niemsri_employees WHERE id = ?', [id]);
 
     if (result.affectedRows === 0) {
-      return res.status(404).json({ success: false, error: 'ไม่พบคำสั่งซื้อนี้' });
+      return res.status(404).json({ success: false, message: 'ไม่พบข้อมูลพนักงานที่ต้องการลบ' });
     }
 
-    res.json({ success: true, message: 'อัปเดตสถานะคำสั่งซื้อสำเร็จ', orderId: Number(id), status });
+    res.status(200).json({ success: true, message: 'ลบพนักงานสำเร็จ' });
   } catch (error) {
-    console.error('Patch Order Status Error:', error);
-    res.status(500).json({ success: false, error: 'เกิดข้อผิดพลาดในการอัปเดตสถานะ' });
+    console.error('Delete Employee Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
-});
+};
 
 // ==========================================
-// 🚀 LISTEN
+// 🧮 3. SALARY ANALYTICS (1D K-Means Clustering)
+// ==========================================
+function kmeans1D(data, k = 3, maxIterations = 100) {
+  if (data.length === 0) return [];
+  if (data.length <= k) {
+    return data.map((val, idx) => ({ group: `Tier ${idx + 1}`, centroid: val, count: 1 }));
+  }
+
+  const sorted = [...data].sort((a, b) => a - b);
+  let centroids = [sorted[0], sorted[Math.floor(sorted.length / 2)], sorted[sorted.length - 1]];
+  let clusters = Array.from({ length: k }, () => []);
+
+  for (let iter = 0; iter < maxIterations; iter++) {
+    clusters = Array.from({ length: k }, () => []);
+    data.forEach((val) => {
+      let minDistance = Infinity;
+      let clusterIndex = 0;
+      centroids.forEach((c, idx) => {
+        const dist = Math.abs(val - c);
+        if (dist < minDistance) {
+          minDistance = dist;
+          clusterIndex = idx;
+        }
+      });
+      clusters[clusterIndex].push(val);
+    });
+
+    let newCentroids = clusters.map((cluster, idx) => {
+      if (cluster.length === 0) return centroids[idx];
+      const sum = cluster.reduce((acc, curr) => acc + curr, 0);
+      return sum / cluster.length;
+    });
+
+    let isConverged = centroids.every((c, idx) => c === newCentroids[idx]);
+    centroids = newCentroids;
+    if (isConverged) break;
+  }
+
+  return clusters
+    .map((cluster, idx) => ({
+      centroid: Math.round(centroids[idx]),
+      count: cluster.length,
+    }))
+    .filter((item) => item.count > 0)
+    .sort((a, b) => a.centroid - b.centroid)
+    .map((item, idx) => ({
+      group: `Tier ${idx + 1}`,
+      centroid: item.centroid,
+      count: item.count,
+    }));
+}
+
+const getClusters = async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT salary FROM Nawaphat_Niemsri_employees');
+    const salaries = rows.map((emp) => Number(emp.salary));
+    const clusters = kmeans1D(salaries, 3);
+
+    res.status(200).json({ success: true, clusters });
+  } catch (error) {
+    console.error('Cluster Error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+// ==========================================
+// 📌 4. ROUTE MAPPINGS (รองรับทั้ง / และ /api/)
 // ==========================================
 
+// Login Routes
+app.post('/login', handleLogin);
+app.post('/api/login', handleLogin);
+
+// Employee Routes (HR)
+app.get('/employees', getEmployees);
+app.get('/api/employees', getEmployees);
+
+app.post('/employees', addEmployee);
+app.post('/api/employees', addEmployee);
+
+app.put('/employees/:id/status', toggleStatus);
+app.put('/api/employees/:id/status', toggleStatus);
+
+app.delete('/employees/:id', deleteEmployee);
+app.delete('/api/employees/:id', deleteEmployee);
+
+// Analytics Routes
+app.get('/employees/salary-clusters', getClusters);
+app.get('/api/employees/salary-clusters', getClusters);
+
+// Start Server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 Server is running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
 });
